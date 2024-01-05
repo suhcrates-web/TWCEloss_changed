@@ -1,3 +1,4 @@
+# torch > nn > modules > loss.py
 import warnings
 
 from .distance import PairwiseDistance
@@ -1170,12 +1171,26 @@ class CrossEntropyLoss(_WeightedLoss):
     label_smoothing: float
 
     def __init__(self, weight: Optional[Tensor] = None, size_average=None, ignore_index: int = -100,
-                 reduce=None, reduction: str = 'mean', label_smoothing: float = 0.0) -> None:
+                 reduce=None, reduction: str = 'mean', label_smoothing: float = 0.0, yb_from = False) -> None:
         super().__init__(weight, size_average, reduce, reduction)
         self.ignore_index = ignore_index
         self.label_smoothing = label_smoothing
+        self.yb_from = yb_from ##yb
 
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
+        # print(input)
+        # print(target)
+        # print(input.shape)
+        # print(target.shape)
+        # input = input.logits[:,11:,:]
+        
+        import json
+        with open("/convei_nas2/ybseo/CL_study/qlora_study/temp_config.json", 'r') as f:
+            yb_from = int(json.load(f)['yb_from'])
+        # input = input[yb_from:,:]
+        # input = input[:yb_from,:]
+        # target = target[yb_from:]
+        # target = target[:yb_from]
         return F.cross_entropy(input, target, weight=self.weight,
                                ignore_index=self.ignore_index, reduction=self.reduction,
                                label_smoothing=self.label_smoothing)
