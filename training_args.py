@@ -1,3 +1,4 @@
+# transformers > training_args.py
 # Copyright 2020 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -1306,6 +1307,10 @@ class TrainingArguments:
         },
     )
 
+
+    yb_generate: bool=field(default=False)
+    yb_prompt: map=field(default='')
+    yb_max_new_tokens: int=field(default=10)
     def __post_init__(self):
         # expand paths, if not os.makedirs("~/bar") will make directory
         # in the current directory instead of the actual home

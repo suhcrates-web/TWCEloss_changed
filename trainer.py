@@ -1,4 +1,7 @@
 # coding=utf-8
+
+## site-packages > transformers > trainer.py
+
 # Copyright 2020-present the HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -795,7 +798,6 @@ class Trainer:
             "pin_memory": self.args.dataloader_pin_memory,
             "persistent_workers": self.args.dataloader_persistent_workers,
         }
-
         if not isinstance(train_dataset, torch.utils.data.IterableDataset):
             dataloader_params["sampler"] = self._get_train_sampler()
             dataloader_params["drop_last"] = self.args.dataloader_drop_last
@@ -1764,6 +1766,10 @@ class Trainer:
 
         # tr_loss is a tensor to avoid synchronization of TPUs through .item()
         tr_loss = torch.tensor(0.0).to(args.device)
+
+        if self.yb_target_weight:
+            tr_loss_origin = torch.tensor(0.0).to(args.device)
+
         # _total_loss_scalar is updated everytime .item() has to be called on tr_loss and stores the sum of all losses
         self._total_loss_scalar = 0.0
         self._globalstep_last_logged = self.state.global_step
@@ -1819,6 +1825,7 @@ class Trainer:
 
             step = -1
             for step, inputs in enumerate(epoch_iterator):
+                # print("에포크~")
                 total_batched_samples += 1
 
                 if self.args.include_num_input_tokens_seen:
@@ -1851,7 +1858,18 @@ class Trainer:
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
 
                 with self.accelerator.accumulate(model):
-                    tr_loss_step = self.training_step(model, inputs)
+                    if self.yb_target_weight:
+                        tr_loss_step, tr_loss_origin_step = self.training_step(model, inputs)
+                        # print("==================")
+                        # print(tr_loss_step)
+                        # print(tr_loss_origin_step)
+                        # print(torch.mean(tr_loss_origin_step))
+                        # print(self.yb_origin_loss_epoch)
+                        self.yb_weight_loss_epoch[epoch] += tr_loss_step
+                        self.yb_origin_loss_epoch[epoch] += torch.mean(tr_loss_origin_step)
+
+                    else:
+                        tr_loss_step = self.training_step(model, inputs)
 
                 if (
                     args.logging_nan_inf_filter
@@ -1862,8 +1880,22 @@ class Trainer:
                     tr_loss += tr_loss / (1 + self.state.global_step - self._globalstep_last_logged)
                 else:
                     tr_loss += tr_loss_step
-
                 self.current_flos += float(self.floating_point_ops(inputs))
+
+                if self.yb_target_weight:
+                    ## tr_loss, tr_loss_origin : loss 전체의 sum
+                    ## tr_loss_step, tr_loss_origin_step : 각 step의 loss. 이거로 backward(), optimize() 가 일어남
+                    if (
+                    args.logging_nan_inf_filter
+                    and not is_torch_tpu_available()
+                    and (torch.isnan(tr_loss_origin_step) or torch.isinf(tr_loss_origin_step))
+                    ):
+                        # if loss is nan or inf simply add the average of previous logged losses
+                        tr_loss_origin += tr_loss_origin / (1 + self.state.global_step - self._globalstep_last_logged)
+                    else:
+                        tr_loss_origin += tr_loss_origin_step
+                        # 전체의 tr_loss_origin 의 sum. 아직 밖으로 내보내는 길 못찾음
+
 
                 is_last_step_and_steps_less_than_grad_acc = (
                     steps_in_epoch <= args.gradient_accumulation_steps and (step + 1) == steps_in_epoch
@@ -1939,6 +1971,18 @@ class Trainer:
                     )
             if self.control.should_training_stop:
                 break
+            
+            if 'yb_generate' in vars(args) and args.yb_generate== True: #
+                with torch.no_grad():
+                    # for prompt in args.yb_prompt
+                    response=model.generate(**args.yb_prompt, max_new_tokens=args.yb_max_new_tokens)
+
+                    response = [self.tokenizer.decode(r0, skip_special_tokens=True) for r0 in response]
+                    # response = self.tokenizer.decode(response[0], skip_special_tokens=False)
+                    self.yb_table.add_data(epoch, float(tr_loss), *response)
+                    logger.info(f"{epoch}/ {tr_loss} /{response}")
+                    print(f"{epoch}/ {tr_loss} /{response}")
+
 
         if args.past_index and hasattr(self, "_past"):
             # Clean the state at the end of training
@@ -2730,10 +2774,15 @@ class Trainer:
         if is_sagemaker_mp_enabled():
             loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps)
             return loss_mb.reduce_mean().detach().to(self.args.device)
-
+        
+        # print(f"use_apex: {self.use_apex}") #false
+        # print(inputs)
+        # print(self.yb_weight_vector)
         with self.compute_loss_context_manager():
-            loss = self.compute_loss(model, inputs)
+            loss = self.compute_loss(model, inputs) #training때 요기로 들어가야됨
 
+            if self.yb_target_weight:
+                loss_origin, loss = loss  # (loss, w_loss) 로 옴. w_loss 로 백프로파.
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
 
@@ -2743,7 +2792,10 @@ class Trainer:
         else:
             self.accelerator.backward(loss)
 
-        return loss.detach() / self.args.gradient_accumulation_steps
+        if self.yb_target_weight:
+            return (loss.detach() / self.args.gradient_accumulation_steps, loss_origin/self.args.gradient_accumulation_steps)
+        else:
+            return loss.detach() / self.args.gradient_accumulation_steps
 
     def compute_loss(self, model, inputs, return_outputs=False):
         """
@@ -2751,17 +2803,39 @@ class Trainer:
 
         Subclass and override for custom behavior.
         """
+
         if self.label_smoother is not None and "labels" in inputs:
             labels = inputs.pop("labels")
         else:
-            labels = None
+            labels = None  # 여기로옴
         outputs = model(**inputs)
+        # label_smoother = None  ,  labels = None   ###yb
+
+        if self.yb_target_weight:
+
+            weight_vector = self.yb_weight_vector
+            ####### w_loss 구하기 #######
+            log_probs = -nn.functional.log_softmax(outputs.logits[:,:-1,:], dim=-1)
+            labels0 = torch.clamp(inputs['input_ids'][:,1:], min=0).unsqueeze(-1)
+            nll_loss = log_probs.gather(dim=-1, index=labels0).squeeze()
+            w_loss = nll_loss * weight_vector  # 데이터셋 수 * 토큰 수
+            ##### 그냥 mean  (전체 토큰수로 나누기)  ####
+            # with torch.no_grad():
+                # print(w_loss.mean())
+            # w_loss = w_loss.mean() #  -> 1개 스칼라로 평균
+
+            ##### 가중평균   sentence별로 sum 한 뒤 sentence별 w 합으로 나눈 뒤 평균  #####
+            w_loss_each = torch.sum(w_loss, dim=-1)
+            w_sum = weight_vector.sum(dim=-1)
+            w_weight_meaned_each = torch.div(w_loss_each , w_sum)
+            w_loss = w_weight_meaned_each.mean()
+
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
         if self.args.past_index >= 0:
             self._past = outputs[self.args.past_index]
 
-        if labels is not None:
+        if labels is not None: # 여기로 안옴
             unwrapped_model = unwrap_model(model)
             if is_peft_available() and isinstance(unwrapped_model, PeftModel):
                 model_name = unwrapped_model.base_model.model._get_name()
@@ -2779,8 +2853,14 @@ class Trainer:
                 )
             # We don't use .loss here since the model may return tuples instead of ModelOutput.
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+                # 데이터 수만큼의 유리수
+            # print(f"loss :  {loss}")
+            # print(f"w_loss :  {w_loss}")
 
-        return (loss, outputs) if return_outputs else loss
+        if self.yb_target_weight:
+            return (loss.detach(), w_loss)  # yb
+        else:
+            return (loss, outputs) if return_outputs else loss # 오리지날
 
     def is_local_process_zero(self) -> bool:
         """

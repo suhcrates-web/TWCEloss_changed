@@ -1,3 +1,5 @@
+## trl > trainer > sft_trainer.py
+
 # Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -135,7 +137,13 @@ class SFTTrainer(Trainer):
         dataset_batch_size: int = 1000,
         neftune_noise_alpha: Optional[float] = None,
         model_init_kwargs: Optional[Dict] = None,
+        yb_table:int=None,
+        yb_weight_vector:int=None,
+        yb_weight_loss_epoch:torch.Tensor=None,
+        yb_origin_loss_epoch:torch.Tensor=None,
+        yb_target_weight:bool=False
     ):
+        self.yb_target_weight = yb_target_weight
         if model_init_kwargs is None:
             model_init_kwargs = {}
         elif not isinstance(model, str):
