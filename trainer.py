@@ -1859,7 +1859,7 @@ class Trainer:
 
                 with self.accelerator.accumulate(model):
                     if self.yb_target_weight:
-                        tr_loss_step, tr_loss_origin_step = self.training_step(model, inputs)
+                        tr_loss_step, tr_loss_origin_step = self.training_step(model, inputs, yb_step=total_batched_samples) # yb_step 내가넣음
                         # print("==================")
                         # print(tr_loss_step)
                         # print(tr_loss_origin_step)
@@ -2750,7 +2750,7 @@ class Trainer:
 
         return ctx_manager
 
-    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], yb_step: int) -> torch.Tensor: # step 내가넣음
         """
         Perform a training step on a batch of inputs.
 
@@ -2779,7 +2779,7 @@ class Trainer:
         # print(inputs)
         # print(self.yb_weight_vector)
         with self.compute_loss_context_manager():
-            loss = self.compute_loss(model, inputs) #training때 요기로 들어가야됨
+            loss = self.compute_loss(model, inputs, yb_step) #training때 요기로 들어가야됨 # step 내가넣음
 
             if self.yb_target_weight:
                 loss_origin, loss = loss  # (loss, w_loss) 로 옴. w_loss 로 백프로파.
@@ -2797,7 +2797,7 @@ class Trainer:
         else:
             return loss.detach() / self.args.gradient_accumulation_steps
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, yb_step, return_outputs=False): #step 내가넣음
         """
         How the loss is computed by Trainer. By default, all models return the loss in the first element.
 
@@ -2813,12 +2813,17 @@ class Trainer:
 
         if self.yb_target_weight:
 
-            weight_vector = self.yb_weight_vector
+            weight_vector = self.yb_weight_vector.squeeze()
             ####### w_loss 구하기 #######
             log_probs = -nn.functional.log_softmax(outputs.logits[:,:-1,:], dim=-1)
             labels0 = torch.clamp(inputs['input_ids'][:,1:], min=0).unsqueeze(-1)
             nll_loss = log_probs.gather(dim=-1, index=labels0).squeeze()
             w_loss = nll_loss * weight_vector  # 데이터셋 수 * 토큰 수
+            
+            #### 순차
+            # yb_step 은 total_batched_samples 임. multi gpu에서는 숫자가 꼬일 수 있으니 참고
+            # w_loss = w_loss[yb_step % weight_vector.shape[0],:]
+
             ##### 그냥 mean  (전체 토큰수로 나누기)  ####
             # with torch.no_grad():
                 # print(w_loss.mean())
