@@ -1,5 +1,3 @@
-## trl > trainer > sft_trainer.py
-
 # Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -44,6 +42,7 @@ from .utils import (
     neftune_post_forward_hook,
 )
 
+from collections import OrderedDict
 
 if is_peft_available():
     from peft import PeftConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
@@ -141,9 +140,19 @@ class SFTTrainer(Trainer):
         yb_weight_vector:int=None,
         yb_weight_loss_epoch:torch.Tensor=None,
         yb_origin_loss_epoch:torch.Tensor=None,
-        yb_target_weight:bool=False
+        yb_weight_loss_epoch_sepa:torch.Tensor=None,
+        yb_origin_loss_epoch_sepa:torch.Tensor=None,
+        yb_task_ppl_epoch_sepa:torch.Tensor=None,
+        yb_task_ppl_epoch:torch.Tensor=None,
+        yb_target_weight:bool=False,
+        yb_task_p_for_tokens:list=[],  # task의 모든 토큰의 확률값들을 에포크별로 저장하기 위함
+        yb_gap_epoch:torch.Tensor=None, # 학습 전후 파라미터 norm 갭 측정
+        yb_origin_param:OrderedDict=None # gap 측정 위한 기준. 최초 state dict
+
+
     ):
         self.yb_target_weight = yb_target_weight
+        self.yb_task_p_for_tokens = yb_task_p_for_tokens
         if model_init_kwargs is None:
             model_init_kwargs = {}
         elif not isinstance(model, str):
@@ -286,7 +295,6 @@ class SFTTrainer(Trainer):
             self.model = self._trl_activate_neftune(self.model)
 
         output = super().train(*args, **kwargs)
-
         # After training we make sure to retrieve back the original forward pass method
         # for the embedding layer by removing the forward post hook.
         if self.neftune_noise_alpha is not None and not self._trainer_supports_neftune:

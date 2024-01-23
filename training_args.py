@@ -1,4 +1,3 @@
-# transformers > training_args.py
 # Copyright 2020 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -1307,10 +1306,16 @@ class TrainingArguments:
         },
     )
 
-
+    yb_inside_rl: bool=field(default=False)
     yb_generate: bool=field(default=False)
     yb_prompt: map=field(default='')
+    yb_ppl: bool=field(default=False)
+    yb_task: map=field(default='')
     yb_max_new_tokens: int=field(default=10)
+    yb_L2: bool=field(default=False)
+    yb_L2_weight: float=field(default=0.01)
+    yb_sequential_sample: bool=field(default=False)
+    yb_gap: bool=field(default=False) # 파라미터 자체가 얼마나 변화되는지 l2 l1 갭
     def __post_init__(self):
         # expand paths, if not os.makedirs("~/bar") will make directory
         # in the current directory instead of the actual home

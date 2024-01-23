@@ -1,4 +1,3 @@
-# torch > nn > modules > loss.py
 import warnings
 
 from .distance import PairwiseDistance

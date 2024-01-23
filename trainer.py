@@ -752,6 +752,8 @@ class Trainer:
             return None
 
         # Build the sampler.
+        if self.args.yb_sequential_sample:
+            return SequentialSampler(self.train_dataset)
         if self.args.group_by_length:
             if is_datasets_available() and isinstance(self.train_dataset, datasets.Dataset):
                 lengths = (
@@ -785,6 +787,7 @@ class Trainer:
             raise ValueError("Trainer: training requires a train_dataset.")
 
         train_dataset = self.train_dataset
+
         data_collator = self.data_collator
         if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
             train_dataset = self._remove_unused_columns(train_dataset, description="training")
@@ -799,10 +802,9 @@ class Trainer:
             "persistent_workers": self.args.dataloader_persistent_workers,
         }
         if not isinstance(train_dataset, torch.utils.data.IterableDataset):
-            dataloader_params["sampler"] = self._get_train_sampler()
+            dataloader_params["sampler"] = self._get_train_sampler() # 여기서 batch가 길이순으로 order됨
             dataloader_params["drop_last"] = self.args.dataloader_drop_last
             dataloader_params["worker_init_fn"] = seed_worker
-
         return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
 
     def _get_eval_sampler(self, eval_dataset: Dataset) -> Optional[torch.utils.data.Sampler]:
@@ -1534,7 +1536,7 @@ class Trainer:
                     ignore_keys_for_eval=ignore_keys_for_eval,
                 )
             finally:
-                hf_hub_utils.enable_progress_bars()
+                hf_hub_utils.disable_progress_bars()
         else:
             return inner_training_loop(
                 args=args,
@@ -1796,6 +1798,7 @@ class Trainer:
                     _ = list(sampler)
 
         total_batched_samples = 0
+
         for epoch in range(epochs_trained, num_train_epochs):
             epoch_iterator = train_dataloader
             if hasattr(epoch_iterator, "set_epoch"):
@@ -1822,6 +1825,7 @@ class Trainer:
                 steps_skipped = steps_trained_in_current_epoch
                 steps_trained_in_current_epoch = 0
                 rng_to_sync = True
+
 
             step = -1
             for step, inputs in enumerate(epoch_iterator):
@@ -1865,7 +1869,14 @@ class Trainer:
                         # print(tr_loss_origin_step)
                         # print(torch.mean(tr_loss_origin_step))
                         # print(self.yb_origin_loss_epoch)
-                        self.yb_weight_loss_epoch[epoch] += tr_loss_step
+
+                        ## sepa
+                        self.yb_weight_loss_epoch_sepa[:,epoch] = self.yb_weight_loss_epoch_sepa[:,epoch] + tr_loss_step
+                        self.yb_origin_loss_epoch_sepa[:,epoch] = self.yb_origin_loss_epoch_sepa[:,epoch] + tr_loss_origin_step
+
+                        ## mean
+                        tr_loss_step = tr_loss_step.mean()
+                        self.yb_weight_loss_epoch[epoch] += tr_loss_step.mean()
                         self.yb_origin_loss_epoch[epoch] += torch.mean(tr_loss_origin_step)
 
                     else:
@@ -1938,6 +1949,15 @@ class Trainer:
                         if not isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                             self.lr_scheduler.step()
 
+                    ### gap 측정
+                    if self.args.yb_gap:
+                        gap0 = torch.tensor(0).to('cuda').to(torch.float32)
+                        for name0, param0 in model.named_parameters():
+                            if param0.requires_grad ==True:
+                                with torch.no_grad():
+                                    gap0 += torch.norm(self.yb_origin_param[name0] - param0, p=1)
+                        self.yb_gap_epoch[epoch] = gap0
+
                     model.zero_grad()
                     self.state.global_step += 1
                     self.state.epoch = epoch + (step + 1 + steps_skipped) / steps_in_epoch
@@ -1972,6 +1992,23 @@ class Trainer:
             if self.control.should_training_stop:
                 break
             
+
+                
+            if 'yb_ppl' in vars(args) and args.yb_ppl== True: #
+                with torch.no_grad():
+                    response=model(**args.yb_task)
+                    log_probs = -nn.functional.log_softmax(response.logits[:,:-1,:], dim=-1)
+                    labels0 = torch.clamp(args.yb_task['input_ids'][:,1:], min=0).unsqueeze(-1)
+                    nll_loss = log_probs.gather(dim=-1, index=labels0).squeeze()
+                    mask0 = args.yb_task['attention_mask'][:,:-1]
+                    nll_loss = nll_loss * mask0
+                    self.yb_task_p_for_tokens.append(nll_loss)
+                    nll_loss_each = nll_loss.mean(dim=-1) # 각 문장의 ppl
+                    self.yb_task_ppl_epoch_sepa[:,epoch] = self.yb_task_ppl_epoch_sepa[:,epoch] + nll_loss_each
+
+                    nll_loss = nll_loss_each.mean() # 한개 숫자
+                    self.yb_task_ppl_epoch[epoch] = nll_loss
+
             if 'yb_generate' in vars(args) and args.yb_generate== True: #
                 with torch.no_grad():
                     # for prompt in args.yb_prompt
@@ -2019,7 +2056,9 @@ class Trainer:
 
         self._memory_tracker.stop_and_update_metrics(metrics)
 
-        self.log(metrics)
+        if not self.args.yb_inside_rl:
+            self.log(metrics)
+            # 원래 있던거. 자꾸 output을 프린트함. rl 안에 껴서 할때는 프린트 끄기 위해서 이렇게 함
 
         run_dir = self._get_output_dir(trial)
         checkpoints_sorted = self._sorted_checkpoints(use_mtime=False, output_dir=run_dir)
@@ -2040,7 +2079,6 @@ class Trainer:
         # for the embedding layer by removing the forward post hook.
         if self.neftune_noise_alpha is not None:
             self._deactivate_neftune(self.model)
-
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
     def _get_output_dir(self, trial):
@@ -2750,7 +2788,7 @@ class Trainer:
 
         return ctx_manager
 
-    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], yb_step: int) -> torch.Tensor: # step 내가넣음
+    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], yb_step: int=0) -> torch.Tensor: # step 내가넣음
         """
         Perform a training step on a batch of inputs.
 
@@ -2776,24 +2814,34 @@ class Trainer:
             return loss_mb.reduce_mean().detach().to(self.args.device)
         
         # print(f"use_apex: {self.use_apex}") #false
-        # print(inputs)
-        # print(self.yb_weight_vector)
         with self.compute_loss_context_manager():
             loss = self.compute_loss(model, inputs, yb_step) #training때 요기로 들어가야됨 # step 내가넣음
 
             if self.yb_target_weight:
-                loss_origin, loss = loss  # (loss, w_loss) 로 옴. w_loss 로 백프로파.
+                loss_origin, loss, loss_sepa = loss  # (loss, w_loss, w_weight_meaned_each) 로 옴. w_loss 로 백프로파.
+                # w_weight_meaned_each 는 데이터별로 나눠진 loss. 기록 및 강화학습용
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+        ######## L2 function #####
+        if self.args.yb_L2 == True:
+            l2 =0
+            for name, param in model.named_parameters():
+                if param.requires_grad==True:
+                    
+                    l2 +=  torch.norm(param,p=2)
+            loss = loss + self.args.yb_L2_weight *l2
+        ########################
 
         if self.use_apex:
             with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                 scaled_loss.backward()
         else:
             self.accelerator.backward(loss)
-
+        #######
         if self.yb_target_weight:
-            return (loss.detach() / self.args.gradient_accumulation_steps, loss_origin/self.args.gradient_accumulation_steps)
+            # return (loss.detach() / self.args.gradient_accumulation_steps, loss_origin/self.args.gradient_accumulation_steps)
+            return (loss_sepa / self.args.gradient_accumulation_steps, loss_origin/self.args.gradient_accumulation_steps) # 기록용 넘김.
         else:
             return loss.detach() / self.args.gradient_accumulation_steps
 
@@ -2818,6 +2866,9 @@ class Trainer:
             log_probs = -nn.functional.log_softmax(outputs.logits[:,:-1,:], dim=-1)
             labels0 = torch.clamp(inputs['input_ids'][:,1:], min=0).unsqueeze(-1)
             nll_loss = log_probs.gather(dim=-1, index=labels0).squeeze()
+            mask0 = inputs['attention_mask'][:,:-1]
+            weight_vector = weight_vector * mask0
+            nll_loss = nll_loss * mask0
             w_loss = nll_loss * weight_vector  # 데이터셋 수 * 토큰 수
             
             #### 순차
@@ -2830,10 +2881,10 @@ class Trainer:
             # w_loss = w_loss.mean() #  -> 1개 스칼라로 평균
 
             ##### 가중평균   sentence별로 sum 한 뒤 sentence별 w 합으로 나눈 뒤 평균  #####
-            w_loss_each = torch.sum(w_loss, dim=-1)
-            w_sum = weight_vector.sum(dim=-1)
-            w_weight_meaned_each = torch.div(w_loss_each , w_sum)
-            w_loss = w_weight_meaned_each.mean()
+            w_loss_each = torch.sum(w_loss, dim=-1) # 문장별 loss 더함
+            w_sum = weight_vector.sum(dim=-1)  # 문장별 weight 합
+            w_weight_meaned_each = torch.div(w_loss_each , w_sum) # 문장별 loss / 문장별 weight sum
+            w_loss = w_weight_meaned_each.mean()  # 다 더함. 스칼라 1개
 
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
@@ -2863,7 +2914,7 @@ class Trainer:
             # print(f"w_loss :  {w_loss}")
 
         if self.yb_target_weight:
-            return (loss.detach(), w_loss)  # yb
+            return (loss.detach(), w_loss, w_weight_meaned_each.detach())  # yb
         else:
             return (loss, outputs) if return_outputs else loss # 오리지날
 
