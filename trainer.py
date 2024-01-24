@@ -1871,13 +1871,15 @@ class Trainer:
                         # print(self.yb_origin_loss_epoch)
 
                         ## sepa
-                        self.yb_weight_loss_epoch_sepa[:,epoch] = self.yb_weight_loss_epoch_sepa[:,epoch] + tr_loss_step
-                        self.yb_origin_loss_epoch_sepa[:,epoch] = self.yb_origin_loss_epoch_sepa[:,epoch] + tr_loss_origin_step
+                        if self.args.yb_loss_write :
+                            self.yb_weight_loss_epoch_sepa[:,epoch] = self.yb_weight_loss_epoch_sepa[:,epoch] + tr_loss_step
+                            self.yb_origin_loss_epoch_sepa[:,epoch] = self.yb_origin_loss_epoch_sepa[:,epoch] + tr_loss_origin_step
 
                         ## mean
                         tr_loss_step = tr_loss_step.mean()
-                        self.yb_weight_loss_epoch[epoch] += tr_loss_step.mean()
-                        self.yb_origin_loss_epoch[epoch] += torch.mean(tr_loss_origin_step)
+                        if self.args.yb_loss_write:
+                            self.yb_weight_loss_epoch[epoch] += tr_loss_step.mean()
+                            self.yb_origin_loss_epoch[epoch] += torch.mean(tr_loss_origin_step)
 
                     else:
                         tr_loss_step = self.training_step(model, inputs)
@@ -2004,7 +2006,10 @@ class Trainer:
                     nll_loss = nll_loss * mask0
                     self.yb_task_p_for_tokens.append(nll_loss)
                     nll_loss_each = nll_loss.mean(dim=-1) # 각 문장의 ppl
-                    self.yb_task_ppl_epoch_sepa[:,epoch] = self.yb_task_ppl_epoch_sepa[:,epoch] + nll_loss_each
+
+                    if not args.yb_inside_rl:
+                        self.yb_task_ppl_epoch_sepa[:,epoch] = self.yb_task_ppl_epoch_sepa[:,epoch] + nll_loss_each
+                        # 단어별로 보고싶을때. 단어별로 ppl 쌓음. 일단 rl에서는 꺼두기로 함
 
                     nll_loss = nll_loss_each.mean() # 한개 숫자
                     self.yb_task_ppl_epoch[epoch] = nll_loss

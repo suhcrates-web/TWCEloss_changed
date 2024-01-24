@@ -1316,6 +1316,7 @@ class TrainingArguments:
     yb_L2_weight: float=field(default=0.01)
     yb_sequential_sample: bool=field(default=False)
     yb_gap: bool=field(default=False) # 파라미터 자체가 얼마나 변화되는지 l2 l1 갭
+    yb_loss_write: bool=field(default=False)
     def __post_init__(self):
         # expand paths, if not os.makedirs("~/bar") will make directory
         # in the current directory instead of the actual home
