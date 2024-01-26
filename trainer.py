@@ -2007,9 +2007,7 @@ class Trainer:
                     self.yb_task_p_for_tokens.append(nll_loss)
                     nll_loss_each = nll_loss.mean(dim=-1) # 각 문장의 ppl
 
-                    if not args.yb_inside_rl:
-                        self.yb_task_ppl_epoch_sepa[:,epoch] = self.yb_task_ppl_epoch_sepa[:,epoch] + nll_loss_each
-                        # 단어별로 보고싶을때. 단어별로 ppl 쌓음. 일단 rl에서는 꺼두기로 함
+                    self.yb_task_ppl_epoch_sepa[:,epoch] = self.yb_task_ppl_epoch_sepa[:,epoch] + nll_loss_each
 
                     nll_loss = nll_loss_each.mean() # 한개 숫자
                     self.yb_task_ppl_epoch[epoch] = nll_loss
