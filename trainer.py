@@ -2859,7 +2859,7 @@ class Trainer:
             labels = inputs.pop("labels")
         else:
             labels = None  # 여기로옴
-        outputs = model(**inputs)
+        outputs = model(**inputs) # input_ids == labels  똑같음.
         # label_smoother = None  ,  labels = None   ###yb
 
         if self.yb_target_weight:
