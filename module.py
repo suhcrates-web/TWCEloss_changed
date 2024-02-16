@@ -578,11 +578,15 @@ class Module:
             raise KeyError(f"attribute '{name}' already exists")
 
         if param is None:
-            self._parameters[name] = None
+            self._parameters[name] = None   # 이거 넣어줌
         elif not isinstance(param, Parameter):
-            raise TypeError(f"cannot assign '{torch.typename(param)}' object to parameter '{name}' "
-                            "(torch.nn.Parameter or None required)"
-                            )
+            self._parameters[name] = param
+            #여기부터--------------
+            # raise TypeError(f"cannot assign '{torch.typename(param)}' object to parameter '{name}' "
+            #                 "(torch.nn.Parameter or None required)"
+            #                 )
+            #여기까지 코멘트아웃----------
+            
         elif param.grad_fn:
             raise ValueError(
                 f"Cannot assign non-leaf Tensor to parameter '{name}'. Model "
@@ -1711,10 +1715,13 @@ class Module:
             remove_from(self.__dict__, self._buffers, self._modules, self._non_persistent_buffers_set)
             self.register_parameter(name, value)
         elif params is not None and name in params:
-            if value is not None:
-                raise TypeError(f"cannot assign '{torch.typename(value)}' as parameter '{name}' "
-                                "(torch.nn.Parameter or None expected)"
-                                )
+
+            #여기부터--------------
+            # if value is not None:
+            #     raise TypeError(f"cannot assign '{torch.typename(value)}' as parameter '{name}' "
+            #                     "(torch.nn.Parameter or None expected)"
+            #                     )
+            #여기까지 코멘트아웃---------
             self.register_parameter(name, value)
         else:
             modules = self.__dict__.get('_modules')
